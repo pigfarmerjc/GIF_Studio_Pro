@@ -67,22 +67,17 @@ class GifOptimizer:
         if total_frames == 0:
             raise ValueError('No frames found in source GIF.')
 
-        # Frame skipping with delay accumulation
-        skipped_frames = []
+        # Each retained frame must inherit the durations until the next retained frame.
+        skip_step = max(1, int(skip_step))
+        kept_indices = list(range(0, total_frames, skip_step))
+        if kept_indices[-1] != total_frames - 1:
+            kept_indices.append(total_frames - 1)
+
+        skipped_frames = [raw_frames[index] for index in kept_indices]
         skipped_delays = []
-        current_delay_accumulator = 0
-
-        for i in range(total_frames):
-            current_delay_accumulator += raw_delays[i]
-
-            if i % skip_step == 0 or i == total_frames - 1:
-                skipped_frames.append(raw_frames[i])
-                skipped_delays.append(current_delay_accumulator)
-                current_delay_accumulator = 0
-
-        # Carry leftover delay into last frame
-        if current_delay_accumulator > 0 and skipped_delays:
-            skipped_delays[-1] += current_delay_accumulator
+        for position, frame_index in enumerate(kept_indices):
+            next_index = kept_indices[position + 1] if position + 1 < len(kept_indices) else total_frames
+            skipped_delays.append(sum(raw_delays[frame_index:next_index]))
 
         optimized_frames = []
         num_kept = len(skipped_frames)

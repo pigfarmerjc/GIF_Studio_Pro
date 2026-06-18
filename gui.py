@@ -8,6 +8,7 @@
 import os
 import shutil
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, colorchooser
 import customtkinter as ctk
@@ -137,6 +138,10 @@ class BaseTab(ctk.CTkFrame):
 
     def on_show(self):
         """Called when this tab becomes visible. Override in subclasses."""
+        pass
+
+    def on_hide(self):
+        """Called before this tab is hidden. Override in subclasses."""
         pass
 
     def __annotate__(format):
@@ -366,6 +371,11 @@ class GIFStudioApp(ctk.CTk):
         self._create_sidebar()
         self._create_content_panels()
         self.select_tab('VideoToGif')
+        self.protocol('WM_DELETE_WINDOW', self._on_close)
+
+    def _on_close(self):
+        self.video_processor.release()
+        self.destroy()
 
     def _create_sidebar(self):
         sidebar = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color=C['sidebar_bg'])
@@ -485,6 +495,8 @@ class GIFStudioApp(ctk.CTk):
                 frame.grid()
                 frame.on_show()
             else:
+                if frame.winfo_viewable():
+                    frame.on_hide()
                 frame.grid_remove()
 
 
@@ -526,6 +538,10 @@ class VideoToGifTab(BaseTab):
         self._img_display_offset = (0, 0)
         self._scrub_pending = False
         self._next_scrub_time = None
+        self._is_playing = False
+        self._play_after_id = None
+        self._play_started_at = 0.0
+        self._play_started_position = 0.0
         self._build_left_panel()
         self._build_right_panel()
         self._build_bottom_bar(
@@ -536,6 +552,7 @@ class VideoToGifTab(BaseTab):
         )
         self.app.bind('<Left>', self._on_key_left)
         self.app.bind('<Right>', self._on_key_right)
+        self.app.bind('<space>', self._on_key_space)
 
     def _build_left_panel(self):
         self.left_frame = ctk.CTkFrame(self, fg_color=C['bg_surface'], corner_radius=12)
@@ -587,15 +604,17 @@ class VideoToGifTab(BaseTab):
         self.lbl_scrub_time.grid(row=1, column=0, sticky='w')
         step_grp = ctk.CTkFrame(timeline, fg_color='transparent')
         step_grp.grid(row=1, column=1, padx=10)
+        self.btn_play = ctk.CTkButton(step_grp, text='▶ 播放', width=72, height=26, fg_color=C['accent'], hover_color=C['accent_hover'], text_color='white', font=ctk.CTkFont(family=FONT, size=11, weight='bold'), command=self._toggle_playback, state='disabled')
+        self.btn_play.grid(row=0, column=0, padx=(2, 6))
         self.btn_prev_frame = ctk.CTkButton(step_grp, text='◀ 上一帧', width=65, height=26, fg_color='transparent', border_width=1, border_color=C['accent_light'], text_color=C['accent_light'], hover_color=C['bg_hover'], font=ctk.CTkFont(family=FONT, size=11), command=lambda: self._step_frame(-1), state='disabled')
-        self.btn_prev_frame.grid(row=0, column=0, padx=2)
+        self.btn_prev_frame.grid(row=0, column=1, padx=2)
         self.entry_frame_step = ctk.CTkEntry(step_grp, width=45, height=26, font=ctk.CTkFont(family=FONT, size=11), justify='center', border_color=C['border'], fg_color=C['bg_primary'])
         self.entry_frame_step.insert(0, '1')
-        self.entry_frame_step.grid(row=0, column=1, padx=2)
+        self.entry_frame_step.grid(row=0, column=2, padx=2)
         self.lbl_frame_unit = ctk.CTkLabel(step_grp, text='帧', font=ctk.CTkFont(family=FONT, size=11), text_color=C['text_muted'])
-        self.lbl_frame_unit.grid(row=0, column=2, padx=(0, 4))
+        self.lbl_frame_unit.grid(row=0, column=3, padx=(0, 4))
         self.btn_next_frame = ctk.CTkButton(step_grp, text='下一帧 ▶', width=65, height=26, fg_color='transparent', border_width=1, border_color=C['accent_light'], text_color=C['accent_light'], hover_color=C['bg_hover'], font=ctk.CTkFont(family=FONT, size=11), command=lambda: self._step_frame(1), state='disabled')
-        self.btn_next_frame.grid(row=0, column=3, padx=2)
+        self.btn_next_frame.grid(row=0, column=4, padx=2)
         btn_grp = ctk.CTkFrame(timeline, fg_color='transparent')
         btn_grp.grid(row=1, column=2, sticky='e')
         self.btn_set_start = ctk.CTkButton(btn_grp, text='[ 📌 起点 ]', width=80, height=26, fg_color='transparent', border_width=1, border_color=C['cyan'], text_color=C['cyan'], hover_color=C['bg_hover'], command=self._set_trim_start, state='disabled')
@@ -604,6 +623,9 @@ class VideoToGifTab(BaseTab):
         self.btn_set_end.grid(row=0, column=1, padx=4)
         self.btn_export_frame = ctk.CTkButton(btn_grp, text='📸 导出帧', width=80, height=26, fg_color='transparent', border_width=1, border_color=C['cyan'], text_color=C['cyan'], hover_color=C['bg_hover'], command=self._export_current_frame, state='disabled')
         self.btn_export_frame.grid(row=0, column=2, padx=4)
+
+    def on_hide(self):
+        self._stop_playback()
 
     def _build_right_panel(self):
         self.right_frame = ctk.CTkScrollableFrame(self, fg_color=C['bg_surface'], corner_radius=12, label_text='⚙️ GIF 核心参数', label_font=ctk.CTkFont(size=13, weight='bold', family=FONT))
@@ -887,6 +909,7 @@ class VideoToGifTab(BaseTab):
 
     def _import_video(self):
         """选择视频文件"""
+        self._stop_playback()
         path = filedialog.askopenfilename(
             title='选择视频文件',
             filetypes=[('视频文件', '*.mp4 *.avi *.mkv *.mov *.webm *.gif'), ('全部文件', '*.*')]
@@ -910,6 +933,7 @@ class VideoToGifTab(BaseTab):
             self.btn_set_end.configure(state='normal')
             self.btn_prev_frame.configure(state='normal')
             self.btn_next_frame.configure(state='normal')
+            self.btn_play.configure(state='normal')
             self.btn_export_frame.configure(state='normal')
             self.btn_compile.configure(state='normal')
             self.entry_start.delete(0, tk.END)
@@ -920,7 +944,7 @@ class VideoToGifTab(BaseTab):
             self._clear_crop()
             self._load_frame_to_canvas(0.0)
             self.lbl_status.configure(
-                text='视频载入成功 ✓  拖拽预览区可选取裁剪区域',
+                text='视频载入成功 ✓  空格播放/暂停 · 左右方向键逐帧 · 拖拽画面选取裁剪区域',
                 text_color=C['success']
             )
             self.progress_bar.set(0)
@@ -960,6 +984,8 @@ class VideoToGifTab(BaseTab):
 
     def _on_scrub(self, value):
         """Ultra-smooth lag-free timeline scrub queue. Limits decoding frequency to at most 25 FPS."""
+        if self._is_playing:
+            self._stop_playback()
         self._next_scrub_time = float(value)
         if not self._scrub_pending:
             self._scrub_pending = True
@@ -986,6 +1012,7 @@ class VideoToGifTab(BaseTab):
         """
         if not self.video_loaded or not self.app.video_processor:
             return
+        self._stop_playback()
         fps = self.app.video_processor.metadata.get('fps', 24.0)
         duration = self.app.video_processor.metadata.get('duration', 0.0)
         total_frames = self.app.video_processor.metadata.get('total_frames', 0)
@@ -1007,6 +1034,55 @@ class VideoToGifTab(BaseTab):
         self.slider_scrub.set(target_time)
         self._load_frame_to_canvas(target_time)
 
+    def _toggle_playback(self):
+        if not self.video_loaded:
+            return
+        if self._is_playing:
+            self._stop_playback()
+            return
+        duration = self.app.video_processor.metadata.get('duration', 0.0)
+        if duration <= 0:
+            return
+        if self.slider_scrub.get() >= duration:
+            self.slider_scrub.set(0)
+            self._load_frame_to_canvas(0.0)
+        self._is_playing = True
+        self._play_started_at = time.monotonic()
+        self._play_started_position = self.slider_scrub.get()
+        self.btn_play.configure(text='⏸ 暂停', fg_color=C['danger'], hover_color=C['danger_hover'])
+        self._schedule_next_frame()
+
+    def _schedule_next_frame(self):
+        if not self._is_playing:
+            return
+        fps = self.app.video_processor.metadata.get('fps', 24.0)
+        frame_delay = max(15, round(1000 / max(1.0, fps)))
+        self._play_after_id = self.after(frame_delay, self._play_next_frame)
+
+    def _play_next_frame(self):
+        self._play_after_id = None
+        if not self._is_playing or not self.winfo_viewable():
+            self._stop_playback()
+            return
+        metadata = self.app.video_processor.metadata
+        duration = metadata.get('duration', 0.0)
+        elapsed = time.monotonic() - self._play_started_at
+        next_time = (self._play_started_position + elapsed) % duration
+        self.slider_scrub.set(next_time)
+        self._load_frame_to_canvas(next_time)
+        self._schedule_next_frame()
+
+    def _stop_playback(self):
+        self._is_playing = False
+        if self._play_after_id is not None:
+            try:
+                self.after_cancel(self._play_after_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._play_after_id = None
+        if hasattr(self, 'btn_play'):
+            self.btn_play.configure(text='▶ 播放', fg_color=C['accent'], hover_color=C['accent_hover'])
+
     def _on_key_left(self, event):
         if not self.video_loaded or not self.winfo_viewable():
             return
@@ -1026,6 +1102,17 @@ class VideoToGifTab(BaseTab):
             if 'entry' in cls_name or 'text' in cls_name:
                 return
         self._step_frame(1)
+
+    def _on_key_space(self, event):
+        if not self.video_loaded or not self.winfo_viewable():
+            return
+        focused = self.focus_get()
+        if focused:
+            cls_name = str(focused).lower()
+            if 'entry' in cls_name or 'text' in cls_name:
+                return
+        self._toggle_playback()
+        return 'break'
 
     def _set_trim_start(self):
         val = self.slider_scrub.get()
@@ -1104,6 +1191,7 @@ class VideoToGifTab(BaseTab):
         self.lbl_status.configure(text=f"✨ 已应用智能预设配方 → {name}", text_color=C['success'])
 
     def _start_conversion(self):
+        self._stop_playback()
         if not self.video_loaded:
             return
         try:
@@ -1199,6 +1287,7 @@ class VideoToGifTab(BaseTab):
         """Public API to load a video file (used by YtDownloaderTab redirect)."""
         if not os.path.exists(path):
             return
+        self._stop_playback()
         self.current_video_path = path
         try:
             meta = self.app.video_processor.load_video(path)
@@ -1213,6 +1302,7 @@ class VideoToGifTab(BaseTab):
             self.btn_set_end.configure(state='normal')
             self.btn_prev_frame.configure(state='normal')
             self.btn_next_frame.configure(state='normal')
+            self.btn_play.configure(state='normal')
             self.btn_export_frame.configure(state='normal')
             self.btn_compile.configure(state='normal')
             self.entry_start.delete(0, tk.END)
