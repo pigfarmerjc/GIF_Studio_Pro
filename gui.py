@@ -6,6 +6,7 @@
 # ============================================================
 
 import os
+import json
 import shutil
 import threading
 import time
@@ -135,6 +136,7 @@ class BaseTab(ctk.CTkFrame):
         """transparent"""
         super().__init__(master, fg_color='transparent')
         self.app = app
+        self._cancel_event = threading.Event()
 
     def on_show(self):
         """Called when this tab becomes visible. Override in subclasses."""
@@ -182,7 +184,20 @@ class BaseTab(ctk.CTkFrame):
             command=save_cmd,
             state='disabled'
         )
-        self.btn_save_gif.grid(row=0, column=1, sticky='e')
+        self.btn_cancel = ctk.CTkButton(
+            action_row,
+            text='✕ 取消任务',
+            width=105,
+            height=46,
+            fg_color=C['danger_muted'],
+            hover_color=C['danger_hover'],
+            font=ctk.CTkFont(size=13, weight='bold', family=FONT),
+            command=self._request_cancel,
+            state='disabled'
+        )
+        self.btn_cancel.grid(row=0, column=1, padx=(0, 10))
+
+        self.btn_save_gif.grid(row=0, column=2, sticky='e')
         
         self.lbl_status = ctk.CTkLabel(
             bar,
@@ -215,6 +230,25 @@ class BaseTab(ctk.CTkFrame):
         """Thread-safe progress + status update."""
         self.after(0, lambda: self.progress_bar.set(val))
         self.after(0, lambda: self.lbl_status.configure(text=text, text_color=C['text_muted']))
+
+    def _begin_task(self):
+        self._cancel_event.clear()
+        self.btn_compile.configure(state='disabled')
+        self.btn_save_gif.configure(state='disabled')
+        self.btn_cancel.configure(state='normal')
+
+    def _finish_task(self):
+        self.btn_compile.configure(state='normal')
+        self.btn_cancel.configure(state='disabled')
+
+    def _request_cancel(self):
+        self._cancel_event.set()
+        self.btn_cancel.configure(state='disabled')
+        self.lbl_status.configure(text='正在安全取消任务...', text_color=C['amber'])
+
+    def _raise_if_cancelled(self):
+        if self._cancel_event.is_set():
+            raise InterruptedError('操作已由用户取消')
 
     def __annotate__(format):
         # --- Auto-reconstructed from bytecode ---
@@ -255,11 +289,21 @@ class BaseTab(ctk.CTkFrame):
 
     def _on_thread_error(self, err, compile_btn_to_restore):
         """Standard thread error handler."""
+        if isinstance(err, InterruptedError):
+            self.after(0, self._show_cancelled)
+            return
         self.after(0, lambda: messagebox.showerror('操作失败', f"发生错误：\n{str(err)}"))
         self.after(0, lambda: self.lbl_status.configure(text=f"❌ 失败: {str(err)[:80]}", text_color=C['danger']))
         self.after(0, lambda: self.progress_bar.set(0))
         if compile_btn_to_restore:
             self.after(0, lambda: compile_btn_to_restore.configure(state='normal'))
+        if hasattr(self, 'btn_cancel'):
+            self.after(0, lambda: self.btn_cancel.configure(state='disabled'))
+
+    def _show_cancelled(self):
+        self.progress_bar.set(0)
+        self.lbl_status.configure(text='任务已取消', text_color=C['amber'])
+        self._finish_task()
 
 
 class GifPreviewer(ctk.CTkFrame):
@@ -356,6 +400,13 @@ class GIFStudioApp(ctk.CTk):
         os.makedirs(_tmp, exist_ok=True)
         self.temp_gif_path = os.path.join(_tmp, 'gif_studio_temp.gif')
         self.temp_opt_path = os.path.join(_tmp, 'gif_studio_optimized.gif')
+        self.settings_dir = os.path.join(os.environ.get('LOCALAPPDATA', _tmp), 'GIF Studio Pro')
+        self.settings_path = os.path.join(self.settings_dir, 'settings.json')
+        self.settings = self._load_settings()
+        self.recent_files = [
+            item for item in self.settings.get('recent_files', [])
+            if os.path.exists(item.get('path', ''))
+        ]
         
         import sys
         if getattr(sys, 'frozen', False):
@@ -370,12 +421,70 @@ class GIFStudioApp(ctk.CTk):
         
         self._create_sidebar()
         self._create_content_panels()
-        self.select_tab('VideoToGif')
+        self._restore_video_settings()
+        self.select_tab(self.settings.get('last_tab', 'VideoToGif'))
         self.protocol('WM_DELETE_WINDOW', self._on_close)
 
     def _on_close(self):
+        for frame in getattr(self, 'frames', {}).values():
+            if hasattr(frame, '_cancel_event'):
+                frame._cancel_event.set()
+            if hasattr(frame, 'stop_play'):
+                frame.stop_play()
+        self._save_settings()
         self.video_processor.release()
         self.destroy()
+
+    def _load_settings(self):
+        try:
+            with open(self.settings_path, 'r', encoding='utf-8') as file:
+                data = json.load(file)
+                return data if isinstance(data, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def _save_settings(self):
+        video_tab = self.frames.get('VideoToGif') if hasattr(self, 'frames') else None
+        if video_tab:
+            self.settings['video_settings'] = {
+                'fps': video_tab.val_fps.get(),
+                'scale': video_tab.val_scale.get(),
+                'speed': video_tab.val_speed.get(),
+                'loop': video_tab.val_loop.get(),
+                'colors': video_tab.val_colors.get(),
+                'filter': video_tab.val_filter.get()
+            }
+        self.settings['appearance'] = self.appearance_option.get() if hasattr(self, 'appearance_option') else 'Dark'
+        self.settings['recent_files'] = self.recent_files[:10]
+        os.makedirs(self.settings_dir, exist_ok=True)
+        temp_path = self.settings_path + '.tmp'
+        try:
+            with open(temp_path, 'w', encoding='utf-8') as file:
+                json.dump(self.settings, file, ensure_ascii=False, indent=2)
+            os.replace(temp_path, self.settings_path)
+        except OSError as error:
+            print(f'Save settings error: {error}')
+
+    def _restore_video_settings(self):
+        values = self.settings.get('video_settings', {})
+        tab = self.frames['VideoToGif']
+        try:
+            tab.val_fps.set(float(values.get('fps', 12)))
+            tab.val_scale.set(float(values.get('scale', 0.5)))
+            tab.val_speed.set(float(values.get('speed', 1.0)))
+            tab.val_loop.set(values.get('loop', 'Normal'))
+            tab.val_colors.set(values.get('colors', '256 (超清)'))
+            tab.val_filter.set(values.get('filter', 'None'))
+            tab._update_basic_lbls(None)
+        except (TypeError, ValueError, tk.TclError):
+            pass
+
+    def record_recent_file(self, path, kind):
+        path = os.path.abspath(path)
+        self.recent_files = [item for item in self.recent_files if item.get('path') != path]
+        self.recent_files.insert(0, {'path': path, 'kind': kind})
+        self.recent_files = self.recent_files[:10]
+        self._save_settings()
 
     def _create_sidebar(self):
         sidebar = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color=C['sidebar_bg'])
@@ -443,20 +552,28 @@ class GIFStudioApp(ctk.CTk):
         self.appearance_option = ctk.CTkOptionMenu(
             sidebar,
             values=['Dark', 'Light'],
-            command=lambda m: ctk.set_appearance_mode(m),
+            command=self._set_appearance_mode,
             fg_color=C['bg_surface'],
             button_color=C['accent'],
             button_hover_color=C['accent_hover'],
             font=ctk.CTkFont(family=FONT)
         )
         self.appearance_option.grid(row=11, column=0, padx=16, pady=(0, 8), sticky='ew')
+        appearance = self.settings.get('appearance', 'Dark')
+        self.appearance_option.set(appearance)
+        ctk.set_appearance_mode(appearance)
         
         ctk.CTkLabel(
             sidebar,
-            text='v2.0  ·  GIF Studio Pro',
+            text='v2.1  ·  GIF Studio Pro',
             text_color=C['text_dim'],
             font=ctk.CTkFont(size=10, family=FONT)
         ).grid(row=12, column=0, padx=16, pady=(0, 16))
+
+    def _set_appearance_mode(self, mode):
+        ctk.set_appearance_mode(mode)
+        self.settings['appearance'] = mode
+        self._save_settings()
 
     def _create_content_panels(self):
         """transparent"""
@@ -484,6 +601,9 @@ class GIFStudioApp(ctk.CTk):
 
     def select_tab(self, name):
         """accent"""
+        if name not in self.frames:
+            name = 'VideoToGif'
+        self.settings['last_tab'] = name
         for tab_key, btn in self.nav_buttons.items():
             active = (tab_key == name)
             btn.configure(
@@ -495,7 +615,7 @@ class GIFStudioApp(ctk.CTk):
                 frame.grid()
                 frame.on_show()
             else:
-                if frame.winfo_viewable():
+                if frame.winfo_viewable() and hasattr(frame, 'on_hide'):
                     frame.on_hide()
                 frame.grid_remove()
 
@@ -561,17 +681,18 @@ class VideoToGifTab(BaseTab):
         self.left_frame.grid_rowconfigure(1, weight=1)
         hdr = ctk.CTkFrame(self.left_frame, fg_color='transparent')
         hdr.grid(row=0, column=0, padx=14, pady=(14, 6), sticky='ew')
-        hdr.grid_columnconfigure(2, weight=1)
+        hdr.grid_columnconfigure(3, weight=1)
         ctk.CTkButton(hdr, text='📂 导入视频', fg_color=C['accent'], hover_color=C['accent_hover'], font=ctk.CTkFont(family=FONT, weight='bold'), command=self._import_video, width=120, height=34).grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkButton(hdr, text='📚 批量转换', fg_color=C['cyan_hover'], hover_color=C['cyan'], font=ctk.CTkFont(family=FONT, weight='bold'), command=self._start_batch_conversion, width=105, height=34).grid(row=0, column=1, padx=(0, 8))
         zoom_frame = ctk.CTkFrame(hdr, fg_color='transparent')
-        zoom_frame.grid(row=0, column=1)
+        zoom_frame.grid(row=0, column=2)
         ctk.CTkButton(zoom_frame, text='➕', width=34, height=34, fg_color=C['bg_card'], hover_color=C['bg_hover'], command=self._zoom_in).grid(row=0, column=0, padx=2)
         ctk.CTkButton(zoom_frame, text='自适应', width=54, height=34, fg_color=C['bg_card'], hover_color=C['bg_hover'], command=self._zoom_reset, font=ctk.CTkFont(size=11, family=FONT)).grid(row=0, column=1, padx=2)
         ctk.CTkButton(zoom_frame, text='➖', width=34, height=34, fg_color=C['bg_card'], hover_color=C['bg_hover'], command=self._zoom_out).grid(row=0, column=2, padx=2)
         self.lbl_zoom = ctk.CTkLabel(zoom_frame, text='100%', text_color=C['text_muted'], font=ctk.CTkFont(size=11))
         self.lbl_zoom.grid(row=0, column=3, padx=(6, 0))
         self.lbl_filename = ctk.CTkLabel(hdr, text='未载入视频', text_color=C['text_dim'], anchor='w', font=ctk.CTkFont(size=11, family=FONT))
-        self.lbl_filename.grid(row=0, column=2, padx=12, sticky='ew')
+        self.lbl_filename.grid(row=0, column=3, padx=12, sticky='ew')
         canvas_container = ctk.CTkFrame(self.left_frame, fg_color=C['bg_primary'], corner_radius=8)
         canvas_container.grid(row=1, column=0, padx=14, pady=6, sticky='nsew')
         canvas_container.grid_rowconfigure(0, weight=1)
@@ -699,9 +820,20 @@ class VideoToGifTab(BaseTab):
         self.lbl_speed = ctk.CTkLabel(sec1, text='1.0×', text_color=C['text_muted'], width=60, anchor='e')
         self.lbl_speed.grid(row=3, column=2, padx=(0, 14), pady=5)
         ctk.CTkLabel(sec1, text='循环样式:', anchor='w').grid(row=4, column=0, padx=14, pady=5, sticky='w')
-        self.val_loop = ctk.CTkOptionMenu(sec1, values=['Normal', 'Reverse', 'Ping-Pong'], fg_color=C['bg_surface'], button_color=C['accent'])
+        self.val_loop = ctk.CTkOptionMenu(sec1, values=['Normal', 'Reverse', 'Ping-Pong'], fg_color=C['bg_surface'], button_color=C['accent'], command=lambda _: self._update_export_estimate())
         self.val_loop.set('Normal')
         self.val_loop.grid(row=4, column=1, columnspan=2, padx=14, pady=8, sticky='ew')
+        self.lbl_export_estimate = ctk.CTkLabel(
+            sec1,
+            text='📊 导入视频后显示导出预估',
+            text_color=C['cyan'],
+            fg_color=C['bg_primary'],
+            corner_radius=7,
+            justify='left',
+            anchor='w',
+            font=ctk.CTkFont(family=FONT, size=10)
+        )
+        self.lbl_export_estimate.grid(row=5, column=0, columnspan=3, padx=12, pady=(4, 12), sticky='ew')
         sec2 = ctk.CTkFrame(self.right_frame, fg_color=C['bg_card'], corner_radius=10)
         sec2.grid(row=2, column=0, padx=6, pady=8, sticky='ew')
         sec2.grid_columnconfigure((1, 3), weight=1)
@@ -710,10 +842,12 @@ class VideoToGifTab(BaseTab):
         self.entry_start = ctk.CTkEntry(sec2, placeholder_text='0.00')
         self.entry_start.insert(0, '0.00')
         self.entry_start.grid(row=1, column=1, padx=(0, 6), pady=6, sticky='ew')
+        self.entry_start.bind('<KeyRelease>', lambda _: self._update_export_estimate())
         ctk.CTkLabel(sec2, text='终点:', anchor='w').grid(row=1, column=2, padx=6, pady=6, sticky='w')
         self.entry_end = ctk.CTkEntry(sec2, placeholder_text='0.00')
         self.entry_end.insert(0, '0.00')
         self.entry_end.grid(row=1, column=3, padx=(0, 14), pady=6, sticky='ew')
+        self.entry_end.bind('<KeyRelease>', lambda _: self._update_export_estimate())
         sec3 = ctk.CTkFrame(self.right_frame, fg_color=C['bg_card'], corner_radius=10)
         sec3.grid(row=3, column=0, padx=6, pady=8, sticky='ew')
         sec3.grid_columnconfigure(1, weight=1)
@@ -738,11 +872,11 @@ class VideoToGifTab(BaseTab):
         self.val_text_size.set(24)
         self.val_text_size.grid(row=5, column=1, padx=14, pady=(5, 10), sticky='ew')
         sec4 = ctk.CTkFrame(self.right_frame, fg_color=C['bg_card'], corner_radius=10)
-        sec4.grid(row=3, column=0, padx=6, pady=8, sticky='ew')
+        sec4.grid(row=4, column=0, padx=6, pady=8, sticky='ew')
         sec4.grid_columnconfigure(1, weight=1)
         _section_title(sec4, '🛡️ 高保真编码', 0)
         ctk.CTkLabel(sec4, text='颜色深度:', anchor='w').grid(row=1, column=0, padx=14, pady=5, sticky='w')
-        self.val_colors = ctk.CTkOptionMenu(sec4, values=['256 (超清)', '128 (标准)', '64 (中等)', '32 (极压)'], fg_color=C['bg_surface'], button_color=C['accent'])
+        self.val_colors = ctk.CTkOptionMenu(sec4, values=['256 (超清)', '128 (标准)', '64 (中等)', '32 (极压)'], fg_color=C['bg_surface'], button_color=C['accent'], command=lambda _: self._update_export_estimate())
         self.val_colors.set('256 (超清)')
         self.val_colors.grid(row=1, column=1, padx=14, pady=5, sticky='ew')
         self.chk_global_palette = ctk.CTkCheckBox(sec4, text='全局最佳调色板 (防闪烁，推荐)', text_color=C['text_primary'], checkmark_color=C['accent'], fg_color=C['accent'])
@@ -879,6 +1013,7 @@ class VideoToGifTab(BaseTab):
                 text_color=C['success']
             )
             self._draw_crop_overlay()
+            self._update_export_estimate()
         else:
             self._clear_crop()
 
@@ -906,6 +1041,7 @@ class VideoToGifTab(BaseTab):
         self._crop_rect = None
         self._canvas.delete('crop_overlay')
         self.lbl_crop_info.configure(text='📐 未选取区域 — 将转换整帧', text_color=C['amber'])
+        self._update_export_estimate()
 
     def _import_video(self):
         """选择视频文件"""
@@ -921,6 +1057,7 @@ class VideoToGifTab(BaseTab):
         self.update_idletasks()
         try:
             meta = self.app.video_processor.load_video(path)
+            self.app.record_recent_file(path, 'video')
             self.current_video_path = path
             self.video_loaded = True
             self.lbl_filename.configure(
@@ -948,6 +1085,7 @@ class VideoToGifTab(BaseTab):
                 text_color=C['success']
             )
             self.progress_bar.set(0)
+            self._update_export_estimate()
         except Exception as e:
             self.lbl_status.configure(text=f"载入失败: {e}", text_color=C['danger'])
             self.progress_bar.set(0)
@@ -1119,12 +1257,14 @@ class VideoToGifTab(BaseTab):
         self.entry_start.delete(0, tk.END)
         self.entry_start.insert(0, f"{val:.2f}")
         self.lbl_status.configure(text=f"起点设为 {val:.2f}s")
+        self._update_export_estimate()
 
     def _set_trim_end(self):
         val = self.slider_scrub.get()
         self.entry_end.delete(0, tk.END)
         self.entry_end.insert(0, f"{val:.2f}")
         self.lbl_status.configure(text=f"终点设为 {val:.2f}s")
+        self._update_export_estimate()
 
     def _export_current_frame(self):
         """Saves the current frame displayed on the canvas as an image file."""
@@ -1163,6 +1303,46 @@ class VideoToGifTab(BaseTab):
         self.lbl_scale.configure(text=f"{int(self.val_scale.get() * 100)}%")
         spd = self.val_speed.get()
         self.lbl_speed.configure(text=f"{spd:.2f}×")
+        self._update_export_estimate()
+
+    def _update_export_estimate(self):
+        if not hasattr(self, 'lbl_export_estimate') or not self.video_loaded:
+            return
+        metadata = self.app.video_processor.metadata
+        try:
+            start = max(0.0, float(self.entry_start.get()))
+            end = min(float(self.entry_end.get()), metadata.get('duration', 0.0))
+        except ValueError:
+            self.lbl_export_estimate.configure(text='📊 请输入有效起止时间以计算导出预估')
+            return
+        duration = max(0.0, end - start)
+        fps = max(1.0, float(self.val_fps.get()))
+        speed = max(0.01, float(self.val_speed.get()))
+        scale = float(self.val_scale.get())
+        if self._crop_rect:
+            source_width, source_height = self._crop_rect[2], self._crop_rect[3]
+        else:
+            source_width = metadata.get('width', 0)
+            source_height = metadata.get('height', 0)
+        width = max(16, int(source_width * scale))
+        height = max(16, int(source_height * scale))
+        width -= width % 2
+        height -= height % 2
+        frame_count = max(1, round(duration * fps / speed))
+        if self.val_loop.get() == 'Ping-Pong' and frame_count > 1:
+            frame_count = frame_count * 2 - 2
+        output_duration = frame_count / fps
+        colors = parse_color_depth(self.val_colors.get())
+        complexity = 0.08 + (colors / 256.0) * 0.22
+        estimated_mb = width * height * frame_count * complexity / 1048576
+        low_mb = estimated_mb * 0.55
+        high_mb = estimated_mb * 1.8
+        self.lbl_export_estimate.configure(
+            text=(
+                f'📊 预计 {width}×{height} · {frame_count} 帧 · {output_duration:.1f}s\n'
+                f'文件大小约 {low_mb:.1f}–{high_mb:.1f} MB（按画面复杂度估算）'
+            )
+        )
 
     def _apply_preset(self, fps, scale, colors, dither, global_p, loop_style, name, desc):
         """Applies the selected preset parameters to all the widgets directly."""
@@ -1220,10 +1400,11 @@ class VideoToGifTab(BaseTab):
                 'colors': parse_color_depth(self.val_colors.get()),
                 'dither': bool(self.chk_dither.get()),
                 'global_palette': bool(self.chk_global_palette.get())
-            }
+            },
+            '_cancel_event': self._cancel_event
         }
-        self.btn_compile.configure(state='disabled')
-        self.btn_save_gif.configure(state='disabled')
+        options['encoder_options']['_cancel_event'] = self._cancel_event
+        self._begin_task()
         self.progress_bar.set(0)
         self.lbl_status.configure(text='初始化转换线程...', text_color=C['text_muted'])
         threading.Thread(
@@ -1232,11 +1413,103 @@ class VideoToGifTab(BaseTab):
             daemon=True
         ).start()
 
+    def _start_batch_conversion(self):
+        paths = filedialog.askopenfilenames(
+            title='选择要批量转换的视频',
+            filetypes=[('视频文件', '*.mp4 *.avi *.mkv *.mov *.webm'), ('全部文件', '*.*')]
+        )
+        if not paths:
+            return
+        output_dir = filedialog.askdirectory(title='选择批量 GIF 输出目录')
+        if not output_dir:
+            return
+        options = {
+            'fps': float(self.val_fps.get()),
+            'scale': float(self.val_scale.get()),
+            'speed': float(self.val_speed.get()),
+            'loop': self.val_loop.get(),
+            'filter': self.val_filter.get(),
+            'crop': None,
+            'text_config': {
+                'text': self.entry_overlay.get(),
+                'position': self.val_text_pos.get(),
+                'font_size': int(self.val_text_size.get()),
+                'color': self._text_color
+            } if self.entry_overlay.get() else None,
+            '_cancel_event': self._cancel_event,
+            'encoder_options': {
+                'colors': parse_color_depth(self.val_colors.get()),
+                'dither': bool(self.chk_dither.get()),
+                'global_palette': bool(self.chk_global_palette.get()),
+                '_cancel_event': self._cancel_event
+            }
+        }
+        self._begin_task()
+        self.progress_bar.set(0)
+        self.lbl_status.configure(text=f'准备批量转换 {len(paths)} 个视频...', text_color=C['text_muted'])
+        threading.Thread(
+            target=self._thread_batch_convert,
+            args=(list(paths), output_dir, options),
+            daemon=True
+        ).start()
+
+    def _thread_batch_convert(self, paths, output_dir, options):
+        completed = []
+        try:
+            total = len(paths)
+            for index, path in enumerate(paths):
+                self._raise_if_cancelled()
+                processor = VideoProcessor(path)
+                try:
+                    duration = processor.metadata.get('duration', 0.0)
+
+                    def update_item_progress(value, text, item=index, count=total):
+                        overall = (item + value) / count
+                        self._update_progress(overall, f'[{item + 1}/{count}] {os.path.basename(path)} · {text}')
+
+                    frames = processor.extract_frames_range(
+                        0.0, duration, options, progress_callback=update_item_progress
+                    )
+                    self._raise_if_cancelled()
+                    if not frames:
+                        raise ValueError(f'未能从 {os.path.basename(path)} 提取视频帧')
+                    output_path = self._unique_batch_output_path(output_dir, path)
+                    self.app.gif_encoder.save_gif(
+                        frames, output_path, fps=options['fps'],
+                        options=options['encoder_options'], progress_callback=update_item_progress
+                    )
+                    completed.append(output_path)
+                finally:
+                    processor.release()
+            self.after(0, lambda: self._show_batch_results(completed, output_dir))
+        except Exception as error:
+            self._on_thread_error(error, self.btn_compile)
+
+    @staticmethod
+    def _unique_batch_output_path(output_dir, video_path):
+        stem = os.path.splitext(os.path.basename(video_path))[0]
+        candidate = os.path.join(output_dir, f'{stem}.gif')
+        suffix = 2
+        while os.path.exists(candidate):
+            candidate = os.path.join(output_dir, f'{stem}_{suffix}.gif')
+            suffix += 1
+        return candidate
+
+    def _show_batch_results(self, completed, output_dir):
+        self._finish_task()
+        self.progress_bar.set(1.0)
+        self.lbl_status.configure(
+            text=f'✅ 批量转换完成：已生成 {len(completed)} 个 GIF',
+            text_color=C['success']
+        )
+        messagebox.showinfo('批量转换完成', f'已生成 {len(completed)} 个 GIF：\n{output_dir}')
+
     def _thread_convert(self, start_t, end_t, options):
         try:
             frames = self.app.video_processor.extract_frames_range(
                 start_t, end_t, options, progress_callback=self._update_progress
             )
+            self._raise_if_cancelled()
             if not frames:
                 raise ValueError('未提取到有效帧，请检查时间范围。')
             self._update_progress(0.9, '帧提取完成，开始编码 GIF...')
@@ -1258,7 +1531,7 @@ class VideoToGifTab(BaseTab):
             text_color=C['success']
         )
         self.progress_bar.set(1.0)
-        self.btn_compile.configure(state='normal')
+        self._finish_task()
         self.btn_save_gif.configure(state='normal')
         info = f"生成成功 ✓  大小: {result['size_mb']:.2f} MB | {result['total_frames']} 帧"
         if self._crop_rect:
@@ -1291,6 +1564,7 @@ class VideoToGifTab(BaseTab):
         self.current_video_path = path
         try:
             meta = self.app.video_processor.load_video(path)
+            self.app.record_recent_file(path, 'video')
             self.video_loaded = True
             self.lbl_filename.configure(
                 text=f"{meta['filename']} | {meta['width']}×{meta['height']} | {meta['duration']:.1f}s",
@@ -1575,6 +1849,8 @@ class ImagesToGifTab(BaseTab):
         if not paths:
             return
         added = self.app.image_processor.add_images(paths)
+        for path in paths:
+            self.app.record_recent_file(path, 'image')
         self.lbl_status.configure(text=f"已添加 {added} 张图片")
         self._refresh_list()
 
@@ -1655,15 +1931,16 @@ class ImagesToGifTab(BaseTab):
             'delay': int(self.val_delay.get()),
             'transition_type': self.val_transition.get(),
             'transition_duration': int(self.val_trans_dur.get()),
-            'fps': 12.0
+            'fps': 12.0,
+            '_cancel_event': self._cancel_event
         }
         enc_opts = {
             'colors': parse_color_depth(self.val_colors.get()),
             'dither': bool(self.chk_dither.get()),
-            'global_palette': True
+            'global_palette': True,
+            '_cancel_event': self._cancel_event
         }
-        self.btn_compile.configure(state='disabled')
-        self.btn_save_gif.configure(state='disabled')
+        self._begin_task()
         self.progress_bar.set(0)
         self.lbl_status.configure(text='正在拼合图片帧...', text_color=C['text_muted'])
         threading.Thread(
@@ -1677,6 +1954,7 @@ class ImagesToGifTab(BaseTab):
             frames, delays = self.app.image_processor.process_frames(
                 options, progress_callback=self._update_progress
             )
+            self._raise_if_cancelled()
             if not frames:
                 raise ValueError('未生成有效帧，请检查图片列表。')
             self._update_progress(0.9, '帧处理完成，编码 GIF...')
@@ -1694,7 +1972,7 @@ class ImagesToGifTab(BaseTab):
             text_color=C['success']
         )
         self.progress_bar.set(1.0)
-        self.btn_compile.configure(state='normal')
+        self._finish_task()
         self.btn_save_gif.configure(state='normal')
 
         win = None
@@ -1935,6 +2213,7 @@ class GifOptimizeTab(BaseTab):
         self.update_idletasks()
         try:
             meta = self.app.gif_optimizer.get_gif_metadata(path)
+            self.app.record_recent_file(path, 'gif')
             self._source_path = path
             self._gif_loaded = True
             self.lbl_filename.configure(
@@ -1979,11 +2258,11 @@ class GifOptimizeTab(BaseTab):
         options = {
             'colors': parse_color_depth(self.val_colors.get()),
             'skip_step': skip_step,
-            'scale': float(self.val_scale.get())
+            'scale': float(self.val_scale.get()),
+            '_cancel_event': self._cancel_event
         }
 
-        self.btn_compile.configure(state='disabled')
-        self.btn_save_gif.configure(state='disabled')
+        self._begin_task()
         self.progress_bar.set(0)
         self.lbl_status.configure(text='正在压缩 GIF...', text_color=C['text_muted'])
         threading.Thread(
@@ -2010,7 +2289,7 @@ class GifOptimizeTab(BaseTab):
             text_color=C['success']
         )
         self.progress_bar.set(1.0)
-        self.btn_compile.configure(state='normal')
+        self._finish_task()
         self.btn_save_gif.configure(state='normal')
 
         win = None
@@ -2045,7 +2324,7 @@ class WorkspaceTab(BaseTab):
 
         ctk.CTkLabel(
             hdr,
-            text='📁 工作区输出 file管理器',
+            text='📁 工作区输出文件管理器',
             font=ctk.CTkFont(size=18, weight='bold', family=FONT),
             text_color=C['accent_light']
         ).grid(row=0, column=0, sticky='w')
@@ -2083,6 +2362,28 @@ class WorkspaceTab(BaseTab):
         )
         btn_refresh.grid(row=0, column=1, padx=4)
 
+        recent_values = self._recent_display_values()
+        self.recent_menu = ctk.CTkOptionMenu(
+            hdr,
+            values=recent_values,
+            width=260,
+            fg_color=C['bg_card'],
+            button_color=C['cyan_hover'],
+            button_hover_color=C['cyan'],
+            font=ctk.CTkFont(family=FONT, size=11)
+        )
+        self.recent_menu.grid(row=2, column=0, pady=(10, 0), sticky='w')
+        self.btn_open_recent = ctk.CTkButton(
+            hdr,
+            text='打开最近文件',
+            width=105,
+            height=28,
+            fg_color=C['cyan_hover'],
+            hover_color=C['cyan'],
+            command=self._open_recent
+        )
+        self.btn_open_recent.grid(row=2, column=1, pady=(10, 0), sticky='e')
+
         self.list_box = ctk.CTkScrollableFrame(
             self.main_frame,
             fg_color=C['bg_primary'],
@@ -2105,7 +2406,43 @@ class WorkspaceTab(BaseTab):
         self._file_widgets = []
 
     def on_show(self):
+        values = self._recent_display_values()
+        self.recent_menu.configure(values=values)
+        self.recent_menu.set(values[0])
         self.refresh_list()
+
+    def _recent_display_values(self):
+        if not self.app.recent_files:
+            return ['暂无最近文件']
+        return [
+            f"{index + 1}. {os.path.basename(item['path'])}"
+            for index, item in enumerate(self.app.recent_files)
+        ]
+
+    def _open_recent(self):
+        if not self.app.recent_files:
+            return
+        try:
+            index = int(self.recent_menu.get().split('.', 1)[0]) - 1
+            item = self.app.recent_files[index]
+        except (ValueError, IndexError):
+            return
+        path = item['path']
+        if not os.path.exists(path):
+            self.app.recent_files.pop(index)
+            self.on_show()
+            return
+        kind = item.get('kind')
+        if kind == 'video':
+            self.app.select_tab('VideoToGif')
+            self.app.frames['VideoToGif'].load_video_file(path)
+        elif kind == 'gif':
+            self.app.select_tab('GifDeco')
+            self.app.frames['GifDeco'].load_gif_from_path(path)
+        elif kind == 'image':
+            self.app.image_processor.add_images([path])
+            self.app.select_tab('ImagesToGif')
+            self.app.frames['ImagesToGif']._refresh_list()
 
     def _open_in_explorer(self):
         if os.path.exists(self.app.workspace_dir):

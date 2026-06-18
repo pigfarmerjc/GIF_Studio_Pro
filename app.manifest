@@ -4,7 +4,7 @@
     name="GIFStudioPro.Desktop"
     processorArchitecture="*"
     type="win32"
-    version="1.0.0.0" />
+    version="2.1.0.0" />
   <description>GIF Studio Pro - GIF 创作与编辑工具</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>

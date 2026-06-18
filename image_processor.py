@@ -84,11 +84,14 @@ class ImageProcessor:
         transition_type = options.get('transition_type', 'None')
         transition_duration = options.get('transition_duration', 200)
         fps = options.get('fps', 12.0)
+        cancel_event = options.get('_cancel_event')
 
         raw_images = []
         total_imgs = len(self.image_paths)
 
         for i, path in enumerate(self.image_paths):
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError('操作已由用户取消')
             if progress_callback:
                 p = min(0.3, 0.3 * (i + 1) / total_imgs)
                 progress_callback(p, f'正在载入图片... ({i + 1}/{total_imgs})')
@@ -126,6 +129,8 @@ class ImageProcessor:
         num_images = len(resized_images)
 
         for i in range(num_images):
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError('操作已由用户取消')
             current_img = resized_images[i]
             if transition_type == 'None' or num_images < 2:
                 compiled_frames.append(current_img)

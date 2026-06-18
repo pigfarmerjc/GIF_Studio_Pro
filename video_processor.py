@@ -220,6 +220,7 @@ class VideoProcessor:
         adjustments = options.get('adjustments', None)
         filter_name = options.get('filter', 'None')
         text_config = options.get('text_config', None)
+        cancel_event = options.get('_cancel_event')
 
         frame_step = (fps / target_fps) * speed
         frame_step = max(1.0, frame_step)
@@ -231,6 +232,9 @@ class VideoProcessor:
         processed_count = 0
 
         while current_frame <= end_frame:
+            if cancel_event is not None and cancel_event.is_set():
+                cap.release()
+                raise InterruptedError('操作已由用户取消')
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(current_frame))
             ret, frame = cap.read()
             if not ret or frame is None:

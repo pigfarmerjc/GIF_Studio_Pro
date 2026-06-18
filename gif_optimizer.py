@@ -54,12 +54,15 @@ class GifOptimizer:
         color_count = options.get('colors', 256)
         scale = options.get('scale', 1.0)
         skip_step = options.get('skip_step', 1)
+        cancel_event = options.get('_cancel_event')
 
         raw_frames = []
         raw_delays = []
 
         with Image.open(input_path) as img:
             for frame in ImageSequence.Iterator(img):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError('操作已由用户取消')
                 raw_frames.append(frame.copy().convert('RGB'))
                 raw_delays.append(frame.info.get('duration', 100))
 
@@ -83,6 +86,8 @@ class GifOptimizer:
         num_kept = len(skipped_frames)
 
         for i, frame in enumerate(skipped_frames):
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError('操作已由用户取消')
             if progress_callback:
                 progress_callback(
                     min(0.9, 0.9 * (i + 1) / num_kept),

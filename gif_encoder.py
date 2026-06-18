@@ -58,6 +58,7 @@ class GifEncoder:
         use_global_palette = options.get('global_palette', True)
         delays = options.get('delays', None)
         loop = options.get('loop', 0)
+        cancel_event = options.get('_cancel_event')
 
         if delays is None:
             delay_per_frame = int(1000.0 / fps)
@@ -77,12 +78,16 @@ class GifEncoder:
                 progress_callback(0.93, '正在以全局调色板映射全部帧...')
 
             for idx, frame in enumerate(pil_images):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError('操作已由用户取消')
                 rgb_frame = frame.convert('RGB')
                 dither_val = Image.Dither.FLOYDSTEINBERG if use_dither else Image.Dither.NONE
                 mapped = rgb_frame.quantize(palette=global_palette_img, dither=dither_val)
                 quantized_frames.append(mapped)
         else:
             for idx, frame in enumerate(pil_images):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError('操作已由用户取消')
                 rgb_frame = frame.convert('RGB')
                 mapped = rgb_frame.quantize(
                     colors=color_count,

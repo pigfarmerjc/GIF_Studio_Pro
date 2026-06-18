@@ -32,6 +32,10 @@ class GifDecoTab(ctk.CTkFrame):
         self.current_frame_idx = 0
         self.is_playing = False
         self.play_after_id = None
+        self._undo_stack = []
+        self._redo_stack = []
+        self._history_coalescing = False
+        self._history_after_id = None
         self.temp_deco_path = os.path.join(
             os.path.expanduser('~'),
             'AppData',
@@ -46,10 +50,88 @@ class GifDecoTab(ctk.CTkFrame):
         self.create_left_panel()
         self.create_right_panel()
         self.create_bottom_progress()
+        self.app.bind('<Control-z>', self._undo)
+        self.app.bind('<Control-y>', self._redo)
 
     def on_show(self):
         """Called when this tab is selected in navigation."""
         pass
+
+    def _capture_history_state(self):
+        layer_states = []
+        for layer in self.layers:
+            state = {
+                key: value for key, value in layer.__dict__.items()
+                if key not in ('_sticker_cache', '_last_loaded_path')
+            }
+            layer_states.append(state)
+        selected_ids = [layer.id for layer in getattr(self, 'selected_layers', [])]
+        return layer_states, selected_ids
+
+    def _record_history(self, coalesce=False):
+        if coalesce and self._history_coalescing:
+            return
+        if not coalesce and self._history_after_id is not None:
+            self.after_cancel(self._history_after_id)
+            self._end_history_coalesce()
+        self._undo_stack.append(self._capture_history_state())
+        self._undo_stack = self._undo_stack[-50:]
+        self._redo_stack.clear()
+        if coalesce:
+            self._history_coalescing = True
+            if self._history_after_id is not None:
+                self.after_cancel(self._history_after_id)
+            self._history_after_id = self.after(500, self._end_history_coalesce)
+        self._update_history_buttons()
+
+    def _end_history_coalesce(self):
+        self._history_coalescing = False
+        self._history_after_id = None
+
+    def _restore_history_state(self, snapshot):
+        layer_states, selected_ids = snapshot
+        restored_layers = []
+        for state in layer_states:
+            layer = DecoLayer(state['id'], state['type'], state['content'])
+            for key, value in state.items():
+                setattr(layer, key, value)
+            restored_layers.append(layer)
+        self.layers = restored_layers
+        self.selected_layers = [layer for layer in self.layers if layer.id in selected_ids]
+        self.selected_layer = self.selected_layers[-1] if self.selected_layers else None
+        self.refresh_layers_list()
+        if self.selected_layer:
+            self.select_layer_by_widget(self.selected_layer)
+        else:
+            self.attrs_frame.grid_remove()
+        self.refresh_preview()
+
+    def _undo(self, event=None):
+        if not self.winfo_viewable() or not self._undo_stack:
+            return
+        if self._history_after_id is not None:
+            self.after_cancel(self._history_after_id)
+        self._end_history_coalesce()
+        self._redo_stack.append(self._capture_history_state())
+        self._restore_history_state(self._undo_stack.pop())
+        self._update_history_buttons()
+        return 'break'
+
+    def _redo(self, event=None):
+        if not self.winfo_viewable() or not self._redo_stack:
+            return
+        if self._history_after_id is not None:
+            self.after_cancel(self._history_after_id)
+        self._end_history_coalesce()
+        self._undo_stack.append(self._capture_history_state())
+        self._restore_history_state(self._redo_stack.pop())
+        self._update_history_buttons()
+        return 'break'
+
+    def _update_history_buttons(self):
+        if hasattr(self, 'btn_undo'):
+            self.btn_undo.configure(state='normal' if self._undo_stack else 'disabled')
+            self.btn_redo.configure(state='normal' if self._redo_stack else 'disabled')
 
     def create_left_panel(self):
         """Builds the visual canvas preview and timeline scrubber."""
@@ -243,7 +325,18 @@ class GifDecoTab(ctk.CTkFrame):
             pady=(0, 5),
             sticky='ew'
         )
-        self.group_btn_frame.grid_columnconfigure((0, 1), weight=1)
+        self.group_btn_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
+
+        self.btn_undo = ctk.CTkButton(
+            self.group_btn_frame, text='↶ 撤销', height=28, fg_color='#475569',
+            hover_color='#64748B', command=self._undo, state='disabled'
+        )
+        self.btn_undo.grid(row=0, column=0, padx=2, sticky='ew')
+        self.btn_redo = ctk.CTkButton(
+            self.group_btn_frame, text='↷ 重做', height=28, fg_color='#475569',
+            hover_color='#64748B', command=self._redo, state='disabled'
+        )
+        self.btn_redo.grid(row=0, column=1, padx=2, sticky='ew')
 
         self.btn_group_layers = ctk.CTkButton(
             self.group_btn_frame,
@@ -256,7 +349,7 @@ class GifDecoTab(ctk.CTkFrame):
         )
         self.btn_group_layers.grid(
             row=0,
-            column=0,
+            column=2,
             padx=2,
             sticky='ew'
         )
@@ -272,7 +365,7 @@ class GifDecoTab(ctk.CTkFrame):
         )
         self.btn_ungroup_layers.grid(
             row=0,
-            column=1,
+            column=3,
             padx=2,
             sticky='ew'
         )
@@ -1259,8 +1352,12 @@ class GifDecoTab(ctk.CTkFrame):
                     dur = frame.info.get('duration', 100)
                     self.source_delays.append(dur if dur > 10 else 100)
             self.source_gif_path = path
+            self.app.record_recent_file(path, 'gif')
             self.gif_loaded = True
             self.current_frame_idx = 0
+            self._undo_stack.clear()
+            self._redo_stack.clear()
+            self._update_history_buttons()
             filename = os.path.basename(path)
             self.lbl_gif_info.configure(
                 text=f"{filename} | {w}x{h} | {total} 帧",
@@ -1387,7 +1484,7 @@ class GifDecoTab(ctk.CTkFrame):
         """Spawns a new DecoLayer overlay."""
         if not self.gif_loaded:
             return
-        layer_id = len(self.layers) + 1
+        layer_id = max((layer.id for layer in self.layers), default=0) + 1
         if layer_type == 'Text':
             new_layer = DecoLayer(layer_id, 'Text', '新建文字')
         elif layer_type == 'Emoji':
@@ -1406,6 +1503,7 @@ class GifDecoTab(ctk.CTkFrame):
             new_layer = DecoLayer(layer_id, 'Sticker', path)
             new_layer.load_sticker()
         
+        self._record_history()
         self.layers.append(new_layer)
         self.selected_layer = new_layer
         self.refresh_layers_list()
@@ -1415,6 +1513,7 @@ class GifDecoTab(ctk.CTkFrame):
     def delete_layer(self, layer):
         """Removes the target layer overlay."""
         if layer in self.layers:
+            self._record_history()
             self.layers.remove(layer)
             if self.selected_layer == layer:
                 self.selected_layer = None
@@ -1427,6 +1526,7 @@ class GifDecoTab(ctk.CTkFrame):
         idx = self.layers.index(layer)
         new_idx = idx + direction
         if 0 <= new_idx < len(self.layers):
+            self._record_history()
             self.layers[idx], self.layers[new_idx] = self.layers[new_idx], self.layers[idx]
             self.refresh_layers_list()
             self.refresh_preview()
@@ -1619,6 +1719,7 @@ class GifDecoTab(ctk.CTkFrame):
             return
         if not self.selected_layer:
             return
+        self._record_history(coalesce=True)
         layer = self.selected_layer
         if layer.type != 'Sticker':
             layer.content = self.entry_content.get()
@@ -1685,6 +1786,7 @@ class GifDecoTab(ctk.CTkFrame):
         )
         if not path:
             return
+        self._record_history()
         self.selected_layer.content = path
         self.selected_layer.load_sticker()
         self.block_trigger = True
@@ -1716,6 +1818,7 @@ class GifDecoTab(ctk.CTkFrame):
         color = colorchooser.askcolor(initialcolor=init_color, title='选择文字效果色彩')
         if not color[1]:
             return
+        self._record_history()
         val = color[1]
         is_light = self.is_light_color(val)
         txt_c = '#000000' if is_light else '#FFFFFF'
@@ -1736,7 +1839,7 @@ class GifDecoTab(ctk.CTkFrame):
             layer.gradient_end_color = val
             self.btn_gradient_end.configure(fg_color=val, text=val, text_color=txt_c)
             
-        self.on_attr_change(None)
+        self.refresh_preview()
 
     def is_light_color(self, hex_color):
         """Determines if hex color is light or dark (for button text contrasts)."""
@@ -2010,6 +2113,7 @@ class GifDecoTab(ctk.CTkFrame):
             x2 = disp_x + disp_w / 2
             y2 = disp_y + disp_h / 2
             if abs(mx - x2) <= 10 and abs(my - y2) <= 10:
+                self._record_history()
                 self._drag_mode = 'resize'
                 self._resize_layer = layer
                 self._drag_start = (mx, my)
@@ -2048,6 +2152,7 @@ class GifDecoTab(ctk.CTkFrame):
             if self.selected_layer:
                 self.select_layer_by_widget(self.selected_layer)
                 
+            self._record_history()
             self._drag_mode = 'move'
             self._drag_start = (mx, my)
             self._layer_start_positions = {l: (l.x_pct, l.y_pct) for l in self.selected_layers}
@@ -2122,6 +2227,7 @@ class GifDecoTab(ctk.CTkFrame):
                 clicked_layer = layer
                 break
         if clicked_layer:
+            self._record_history()
             self.selected_layer = clicked_layer
             self.selected_layers = [clicked_layer]
             self.select_layer_by_widget(clicked_layer)
@@ -2166,6 +2272,7 @@ class GifDecoTab(ctk.CTkFrame):
             messagebox.showinfo('无法组合', '请按住 Shift / Ctrl 键点击图层多选，至少选择 2 个图层以进行组合。')
             return
         import time
+        self._record_history()
         new_group_id = int(time.time())
         for l in self.selected_layers:
             l.group_id = new_group_id
@@ -2176,6 +2283,7 @@ class GifDecoTab(ctk.CTkFrame):
         """Breaks the grouping of currently selected layers."""
         if not hasattr(self, 'selected_layers') or not self.selected_layers:
             return
+        self._record_history()
         count = 0
         for l in self.selected_layers:
             if hasattr(l, 'group_id') and l.group_id:

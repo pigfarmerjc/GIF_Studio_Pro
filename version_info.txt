@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(1, 0, 0, 0),
-        prodvers=(1, 0, 0, 0),
+        filevers=(2, 1, 0, 0),
+        prodvers=(2, 1, 0, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
                 [
                     StringStruct("CompanyName", "GIF Studio Pro"),
                     StringStruct("FileDescription", "GIF Studio Pro - GIF 创作与编辑工具"),
-                    StringStruct("FileVersion", "1.0.0"),
+                    StringStruct("FileVersion", "2.1.0"),
                     StringStruct("InternalName", "GIF_Studio_Pro"),
                     StringStruct("LegalCopyright", "Copyright (C) 2026 GIF Studio Pro"),
                     StringStruct("OriginalFilename", "GIF_Studio_Pro.exe"),
                     StringStruct("ProductName", "GIF Studio Pro"),
-                    StringStruct("ProductVersion", "1.0.0"),
+                    StringStruct("ProductVersion", "2.1.0"),
                 ],
             )
         ]),
