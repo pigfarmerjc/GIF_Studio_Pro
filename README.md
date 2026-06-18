@@ -53,6 +53,8 @@ GIF Studio Pro 是一款基于 Python 3.14 + CustomTkinter 打造的现代化桌
 我们已为您将所有代码和第三方静态依赖项整体打包封装为了独立的可执行文件。
 * 双击运行：[dist/GIF_Studio_Pro.exe](file:///C:/临时文件/GIF_Studio_Pro_source/dist/GIF_Studio_Pro.exe) 即可启动软件，无需配置任何 Python 环境。
 
+> Windows Smart App Control 会结合有效代码签名和云端信誉判断应用是否可信。开发阶段可使用下方源代码方式运行；对外分发的 EXE 应使用受信任的代码签名证书签名，不能通过修改程序代码绕过该安全检查。
+
 ### 方式 B：从源代码启动
 
 #### 1. 安装项目依赖
@@ -66,6 +68,23 @@ pip install customtkinter Pillow opencv-python numpy yt-dlp imageio-ffmpeg
 ```bash
 python main.py
 ```
+
+### 构建 Windows 程序
+
+未签名的本地测试构建：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build.ps1
+```
+
+正式发布时，先安装 Windows SDK，并将代码签名证书导入当前用户证书存储，再执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -CertificateThumbprint "你的证书指纹"
+```
+
+也可以通过环境变量 `CODE_SIGNING_CERT_THUMBPRINT` 提供证书指纹。构建脚本使用 SHA-256 和 RFC 3161 时间戳，并在签名后调用 SignTool 验证产物。
+如果 Python 未安装在当前用户的标准目录，可使用 `-PythonPath "C:\path\to\python.exe"` 或环境变量 `PYTHON_PATH` 指定解释器。
 
 ---
 

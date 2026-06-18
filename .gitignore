@@ -1,6 +1,7 @@
 # PyInstaller build files
 build/
 *.spec
+!GIF_Studio_Pro.spec
 
 # Python cache
 __pycache__/
