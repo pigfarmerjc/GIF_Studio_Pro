@@ -67,7 +67,7 @@ class ImageProcessor:
         """Returns the list of metadata dictionaries."""
         return self.images_metadata
 
-    def process_frames(self, options, progress_callback):
+    def process_frames(self, options, progress_callback=None):
         """
         Loads all added images, applies resizing, scaling, and generates frame sequences
         along with transition crossfades if specified.

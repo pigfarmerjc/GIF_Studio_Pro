@@ -60,7 +60,7 @@ class VideoProcessor:
         }
         return self.metadata
 
-    def get_frame_at_time(self, seconds, target_width):
+    def get_frame_at_time(self, seconds, target_width=None):
         """
         Retrieves a single frame at a specific timestamp (in seconds) for timeline scrubbing.
         Returns a PIL Image.
@@ -88,7 +88,7 @@ class VideoProcessor:
             img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
         return img
 
-    def apply_filters_and_adjustments(self, pil_img, adjustments, filter_name):
+    def apply_filters_and_adjustments(self, pil_img, adjustments=None, filter_name=None):
         """
         Applies brightness, contrast, saturation, and artistic filters to a PIL Image.
         """
