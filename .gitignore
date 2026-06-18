@@ -1,0 +1,13 @@
+# PyInstaller build files
+build/
+*.spec
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Disassembly and intermediate bytecode files
+*_dis/
+*bytecode.txt
+check_todos.py
+deduplicate_gui.py
