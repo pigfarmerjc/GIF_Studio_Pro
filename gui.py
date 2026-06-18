@@ -2052,8 +2052,11 @@ class WorkspaceTab(BaseTab):
             item.grid_propagate(False)
 
             ext = os.path.splitext(filename)[1].lower()
+            is_video = ext in ('.mp4', '.avi', '.mov', '.mkv', '.webm')
             if ext in ('.gif', '.png', '.jpg', '.jpeg'):
                 icon = '🖼️'
+            elif is_video:
+                icon = '🎥'
             else:
                 icon = '📄'
 
@@ -2076,10 +2079,10 @@ class WorkspaceTab(BaseTab):
 
             full_path = os.path.join(self.app.workspace_dir, filename)
 
-            if ext in ('.gif', '.png', '.jpg', '.jpeg'):
+            if ext in ('.gif', '.png', '.jpg', '.jpeg') or is_video:
                 btn_preview = ctk.CTkButton(
                     btn_frame,
-                    text='👁️ 预览',
+                    text='▶️ 播放' if is_video else '👁️ 预览',
                     width=65,
                     height=28,
                     fg_color=C['accent'],
@@ -2105,6 +2108,13 @@ class WorkspaceTab(BaseTab):
 
     def _preview_file(self, file_path):
         ext = os.path.splitext(file_path)[1].lower()
+        if ext in ('.mp4', '.avi', '.mov', '.mkv', '.webm'):
+            try:
+                os.startfile(file_path)
+            except Exception as e:
+                messagebox.showerror('播放失败', f"无法播放视频：\n{e}")
+            return
+
         if ext == '.gif':
             open_gif_preview_dialog(
                 self,
